@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini Phiên Âm</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Babel for JSX transformation in browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #0f172a;
+        color: #f8fafc;
+      }
+      /* Custom scrollbar */
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 8px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.3);
+        border-radius: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.5);
+      }
+      .animate-fade-in {
+        animation: fadeIn 0.5s ease-in-out;
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    </style>
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.29.0",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
+  }
+}
+</script>
+  <link rel="stylesheet" href="/index.css">
+</head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-presets="react,typescript" data-type="module">
+      import React, { useState, useRef, useEffect } from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { GoogleGenAI } from "@google/genai";
+
+      // ==========================================
+      // CẤU HÌNH API KEY (QUAN TRỌNG CHO VERCEL)
+      // ==========================================
+      // Khi deploy Vercel dạng file tĩnh (Static HTML), process.env KHÔNG hoạt động.
+      // Bạn HÃY DÁN TRỰC TIẾP API KEY VÀO DÒNG DƯỚI ĐÂY:
+      const API_KEY_INPUT = "DÁN_API_KEY_CỦA_BẠN_VÀO_ĐÂY";
+      
+      const getApiKey = () => {
+          // Trả về trực tiếp biến input vì process.env không tồn tại trên static hosting
+          return API_KEY_INPUT;
+      };
+
+      // ==========================================
+      // UTILS (Xử lý âm thanh)
+      // ==========================================
+
+      function blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            if (typeof reader.result === 'string') {
+              const base64 = reader.result.split(',')[1];
+              resolve(base64);
+            } else {
+              reject(new Error('Failed to convert blob to base64'));
+            }
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      const TARGET_SAMPLE_RATE = 16000;
+      const TARGET_CHANNELS = 1; 
+
+      async function getAudioBufferFromFile(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        return await audioCtx.decodeAudioData(arrayBuffer);
+      }
+
+      function audioDataToWavFile(channelData, sampleRate, fileName) {
+        const buffer = new AudioBuffer({
+          length: channelData.length,
+          numberOfChannels: 1,
+          sampleRate: sampleRate
+        });
+        buffer.copyToChannel(channelData, 0);
+        const blob = audioBufferToWav(buffer);
+        return new File([blob], fileName, { type: 'audio/wav' });
+      }
+
+      function audioBufferToWav(buffer) {
+        const numOfChan = buffer.numberOfChannels;
+        const length = buffer.length * numOfChan * 2 + 44;
+        const bufferOut = new ArrayBuffer(length);
+        const view = new DataView(bufferOut);
+        const channels = [];
+        let i;
+        let sample;
+        let offset = 0;
+        let pos = 0;
+
+        function setUint16(data) {
+          view.setUint16(pos, data, true);
+          pos += 2;
+        }
+
+        function setUint32(data) {
+          view.setUint32(pos, data, true);
+          pos += 4;
+        }
+
+        setUint32(0x46464952); // "RIFF"
+        setUint32(length - 8); 
+        setUint32(0x45564157); // "WAVE"
+        setUint32(0x20746d66); // "fmt "
+        setUint32(16); 
+        setUint16(1); 
+        setUint16(numOfChan);
+        setUint32(buffer.sampleRate);
+        setUint32(buffer.sampleRate * 2 * numOfChan); 
+        setUint16(numOfChan * 2); 
+        setUint16(16); 
+        setUint32(0x61746164); // "data"
+        setUint32(length - pos - 4); 
+
+        for (i = 0; i < buffer.numberOfChannels; i++)
+          channels.push(buffer.getChannelData(i));
+
+        while (pos < buffer.length) {
+          for (i = 0; i < numOfChan; i++) {
+            sample = Math.max(-1, Math.min(1, channels[i][pos])); 
+            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; 
+            view.setInt16(44 + offset, sample, true);
+            offset += 2;
+          }
+          pos++;
+        }
+
+        return new Blob([bufferOut], { type: 'audio/wav' });
+      }
+
+      async function compressAudio(file) {
+        const audioBuffer = await getAudioBufferFromFile(file);
+        const offlineCtx = new OfflineAudioContext(
+          TARGET_CHANNELS,
+          audioBuffer.duration * TARGET_SAMPLE_RATE, 
+          TARGET_SAMPLE_RATE
+        );
+        const source = offlineCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(offlineCtx.destination);
+        source.start();
+        const renderedBuffer = await offlineCtx.startRendering();
+        const wavBlob = audioBufferToWav(renderedBuffer);
+        return new File([wavBlob], `compressed_${file.name.replace(/\.[^/.]+$/, "")}.wav`, { type: 'audio/wav' });
+      }
+
+      async function splitAudio(file) {
+        const audioBuffer = await getAudioBufferFromFile(file);
+        const CHUNK_DURATION_SEC = 300; 
+        
+        if (audioBuffer.duration <= CHUNK_DURATION_SEC) {
+          return [await compressAudio(file)];
+        }
+
+        const totalDuration = audioBuffer.duration;
+        const chunks = [];
+        const baseName = file.name.replace(/\.[^/.]+$/, "");
+        
+        const offlineCtx = new OfflineAudioContext(
+          TARGET_CHANNELS,
+          totalDuration * TARGET_SAMPLE_RATE,
+          TARGET_SAMPLE_RATE
+        );
+        
+        const source = offlineCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(offlineCtx.destination);
+        source.start();
+        
+        const resampledBuffer = await offlineCtx.startRendering();
+        const pcmData = resampledBuffer.getChannelData(0); 
+        
+        const samplesPerChunk = CHUNK_DURATION_SEC * TARGET_SAMPLE_RATE;
+        let startSample = 0;
+        let partIndex = 1;
+
+        while (startSample < pcmData.length) {
+          const endSample = Math.min(startSample + samplesPerChunk, pcmData.length);
+          const chunkData = pcmData.slice(startSample, endSample);
+          
+          const chunkFile = audioDataToWavFile(
+            chunkData, 
+            TARGET_SAMPLE_RATE, 
+            `${baseName}_part${partIndex}.wav`
+          );
+          
+          chunks.push(chunkFile);
+          
+          startSample = endSample;
+          partIndex++;
+        }
+
+        return chunks;
+      }
+
+      // ==========================================
+      // COMPONENT: AudioTranscriber
+      // ==========================================
+      
+      const MAX_FILE_SIZE = 15 * 1024 * 1024; 
+
+      // >>> TỐI ƯU CHO GÓI FREE TIER <<<
+      // Google Free Tier giới hạn 15 requests/phút (RPM).
+      // Để an toàn, chúng ta cần delay tối thiểu 4 giây (60s / 15 = 4s).
+      // Đặt 5000ms (5 giây) là mức an toàn nhất.
+      const CHUNK_DELAY_MS = 5000; 
+
+      // Thời gian chờ cơ bản khi gặp lỗi Server quá tải (503) để thử lại
+      const RETRY_DELAY_MS = 5000;
+
+      const AudioTranscriber = () => {
+        const [isProcessing, setIsProcessing] = useState(false);
+        const [isSplitting, setIsSplitting] = useState(false); 
+        const [processingStatus, setProcessingStatus] = useState('');
+        const [transcription, setTranscription] = useState('');
+        const [systemPrompt, setSystemPrompt] = useState("Tóm tắt các điểm chính từ bản phiên âm âm thanh này thành một danh sách ngắn gọn.");
+        const [analysis, setAnalysis] = useState('');
+        const [isAnalyzing, setIsAnalyzing] = useState(false);
+        const [autoAnalyze, setAutoAnalyze] = useState(true);
+        const [selectedFile, setSelectedFile] = useState(null);
+        const [fileParts, setFileParts] = useState([]);
+        
+        const fileInputRef = useRef(null);
+
+        const handleFileSelection = async (file) => {
+            setTranscription('');
+            setAnalysis('');
+            setSelectedFile(file);
+            setFileParts([]); 
+
+            if (file.size > MAX_FILE_SIZE) {
+                try {
+                    setIsSplitting(true);
+                    setProcessingStatus("Đang chuẩn hóa và chia nhỏ tệp lớn...");
+                    const chunks = await splitAudio(file);
+                    setFileParts(chunks);
+                    setProcessingStatus(`Đã chia thành ${chunks.length} phần. Sẵn sàng phiên âm.`);
+                    setIsSplitting(false);
+                } catch (error) {
+                    console.error("Lỗi xử lý file:", error);
+                    alert("Đã xảy ra lỗi khi cố gắng xử lý tệp âm thanh.");
+                    setIsSplitting(false);
+                    setProcessingStatus("");
+                    setSelectedFile(null);
+                }
+            } else {
+                setFileParts([file]);
+                setProcessingStatus("");
+            }
+        };
+
+        const handleFileChange = (e) => {
+            if (e.target.files && e.target.files[0]) {
+            handleFileSelection(e.target.files[0]);
+            }
+        };
+
+        const handleDrop = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                handleFileSelection(e.dataTransfer.files[0]);
+            }
+        };
+
+        const handleDragOver = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        };
+
+        const processFile = async () => {
+            if (selectedFile && fileParts.length > 0) {
+                await handleTranscriptionFlow(fileParts);
+            }
+        };
+
+        const runAnalysis = async (textToAnalyze) => {
+            if (!textToAnalyze) return;
+            setIsAnalyzing(true);
+            try {
+                const apiKey = getApiKey();
+                if (!apiKey || apiKey.includes("DÁN_API_KEY")) {
+                    throw new Error("Vui lòng cấu hình API KEY trong mã nguồn (Dòng 45).");
+                }
+                const ai = new GoogleGenAI({ apiKey });
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    config: { systemInstruction: systemPrompt },
+                    contents: [{ text: textToAnalyze }]
+                });
+                setAnalysis(response.text || "Không có phân tích nào được tạo.");
+            } catch (error) {
+                console.error("Lỗi phân tích:", error);
+                setAnalysis(`Lỗi trong quá trình phân tích: ${error.message}`);
+            } finally {
+                setIsAnalyzing(false);
+            }
+        };
+
+        const handleTranscriptionFlow = async (parts) => {
+            setIsProcessing(true);
+            setAnalysis('');
+            
+            let fullTranscript = "";
+            const apiKey = getApiKey();
+            
+            if (!apiKey || apiKey.includes("DÁN_API_KEY")) {
+                setTranscription("Lỗi: Chưa cấu hình API Key. Vui lòng mở file index.html và nhập API Key vào biến API_KEY_INPUT (Dòng 45).");
+                setIsProcessing(false);
+                return;
+            }
+
+            const ai = new GoogleGenAI({ apiKey });
+
+            try {
+                for (let i = 0; i < parts.length; i++) {
+                    const currentFile = parts[i];
+                    const partNum = i + 1;
+                    const total = parts.length;
+                    
+                    setProcessingStatus(total > 1 ? `Đang phiên âm phần ${partNum}/${total} (Chờ ${CHUNK_DELAY_MS/1000}s để tránh lỗi Free Tier)...` : "Đang phiên âm...");
+
+                    // Delay giữa các request để tránh Rate Limit của Free Tier
+                    if (i > 0) {
+                        await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
+                    }
+
+                    const partText = await transcribeSingleFile(ai, currentFile);
+                    
+                    if (partText) {
+                        fullTranscript += (fullTranscript ? "\n\n" : "") + partText;
+                        setTranscription(fullTranscript); 
+                    }
+                }
+
+                if (!fullTranscript) {
+                    setTranscription("Không tạo được bản phiên âm.");
+                } else {
+                    if (autoAnalyze) {
+                        setProcessingStatus("Đang phân tích nội dung...");
+                        await runAnalysis(fullTranscript);
+                    }
+                }
+
+            } catch (error) {
+                console.error("Lỗi quy trình phiên âm:", error);
+                let errorMsg = error.message || JSON.stringify(error);
+                if (errorMsg.includes("500") || errorMsg.includes("Rpc failed")) {
+                     errorMsg = "Lỗi kết nối hoặc tệp quá lớn. Hệ thống đã cố gắng xử lý nhưng thất bại. Vui lòng kiểm tra lại mạng.";
+                }
+                setTranscription(prev => prev + `\n\n[Lỗi dừng đột ngột]: ${errorMsg}`);
+            } finally {
+                setIsProcessing(false);
+                setProcessingStatus("");
+            }
+        };
+
+        // Hàm phiên âm với cơ chế Retry khi gặp lỗi 503
+        const transcribeSingleFile = async (ai, file) => {
+            const base64Data = await blobToBase64(file);
+            let mimeType = file.type;
+            if (!mimeType || mimeType === '') mimeType = 'audio/wav'; 
+
+            const maxRetries = 3;
+            let attempt = 0;
+
+            while (attempt < maxRetries) {
+                try {
+                    const response = await ai.models.generateContent({
+                        model: 'gemini-2.5-flash',
+                        contents: {
+                        parts: [
+                            { inlineData: { mimeType: mimeType, data: base64Data } },
+                            { text: "Phiên âm âm thanh này một cách chính xác. Chỉ trả về văn bản đã phiên âm, không thêm lời dẫn." }
+                        ]
+                        }
+                    });
+                    return response.text || "";
+                } catch (error) {
+                    const errorMsg = error.message || "";
+                    // Kiểm tra nếu lỗi là 503 Service Unavailable hoặc Overloaded hoặc 429 Too Many Requests
+                    const isOverloaded = errorMsg.includes("503") || errorMsg.includes("overloaded") || errorMsg.includes("UNAVAILABLE") || errorMsg.includes("429");
+                    
+                    if (isOverloaded && attempt < maxRetries - 1) {
+                        attempt++;
+                        const waitTime = RETRY_DELAY_MS * attempt; // Tăng thời gian chờ khi retry
+                        console.log(`Model đang bận (503/429), đang thử lại lần ${attempt} sau ${waitTime/1000}s...`);
+                        setProcessingStatus(`Hệ thống bận, đang thử lại (${attempt}/${maxRetries})...`);
+                        await new Promise(resolve => setTimeout(resolve, waitTime));
+                        continue;
+                    }
+
+                    console.error(`Lỗi part ${file.name}:`, error);
+                    throw error; 
+                }
+            }
+        };
+
+        return (
+            <div className="flex flex-col h-full w-full max-w-6xl mx-auto p-4 animate-fade-in">
+                <div className="mb-6 text-center">
+                    <h2 className="text-3xl font-bold text-white mb-1 drop-shadow-md">Phiên âm & Phân tích</h2>
+                    <p className="text-white/70 text-sm">Hỗ trợ file lớn (tự động chia nhỏ và xử lý tuần tự).</p>
+                </div>
+
+                <div className="flex flex-col md:flex-row gap-6 h-full min-h-0">
+                    <div className="flex flex-col md:w-1/3 gap-4">
+                        <div className="bg-black/20 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl overflow-hidden flex-shrink-0">
+                            <div className="p-4 border-b border-white/10 bg-white/5">
+                                <h3 className="text-sm font-semibold text-white">Tải tệp âm thanh</h3>
+                            </div>
+
+                            <div className="flex flex-col items-center justify-center p-6 min-h-[250px]">
+                                <div 
+                                    className="w-full h-full flex flex-col items-center justify-center"
+                                    onDrop={handleDrop}
+                                    onDragOver={handleDragOver}
+                                >
+                                    <input 
+                                        type="file" 
+                                        ref={fileInputRef} 
+                                        onChange={handleFileChange} 
+                                        accept="audio/*,video/mp4,video/mpeg,video/webm" 
+                                        className="hidden" 
+                                    />
+                                    
+                                    {isSplitting ? (
+                                        <div className="flex flex-col items-center justify-center text-white/80">
+                                            <svg className="animate-spin h-10 w-10 text-white mb-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            <p className="font-medium text-center">{processingStatus}</p>
+                                            <p className="text-xs text-white/50 mt-1">Quá trình này có thể mất vài phút với tệp lớn</p>
+                                        </div>
+                                    ) : !selectedFile ? (
+                                        <div 
+                                            onClick={() => fileInputRef.current?.click()}
+                                            className="w-full h-56 border-2 border-dashed border-white/20 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:border-white/50 hover:bg-white/5 transition-all group"
+                                        >
+                                            <div className="p-3 bg-white/10 rounded-full mb-3 group-hover:scale-110 transition-transform shadow-lg">
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                                </svg>
+                                            </div>
+                                            <p className="text-white/80 text-sm font-medium">Nhấp hoặc kéo thả tệp</p>
+                                            <p className="text-[10px] text-white/50 mt-1 text-center px-4">Hỗ trợ mọi file âm thanh/video<br/>Tự động chia nhỏ file lớn</p>
+                                        </div>
+                                    ) : (
+                                        <div className="w-full flex flex-col items-center">
+                                            <div className="w-full bg-white/10 p-3 rounded-xl border border-white/10 mb-4 flex items-center gap-3">
+                                                <div className="p-2 bg-white/20 rounded-lg">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 3-2 3-2zm0 0v-8" />
+                                                    </svg>
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-sm font-medium text-white truncate">{selectedFile.name}</p>
+                                                    <p className="text-xs text-white/60">
+                                                        {(selectedFile.size / 1024 / 1024).toFixed(2)} MB 
+                                                        {fileParts.length > 1 && ` • Chia thành ${fileParts.length} phần`}
+                                                    </p>
+                                                </div>
+                                                <button onClick={() => { setSelectedFile(null); setFileParts([]); setTranscription(''); setAnalysis(''); }} className="text-white/50 hover:text-red-400">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                            
+                                            <button
+                                                onClick={processFile}
+                                                disabled={isProcessing}
+                                                className="w-full py-3 bg-white text-indigo-900 hover:bg-white/90 rounded-xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-[1.02]"
+                                            >
+                                                {isProcessing ? (
+                                                     <>
+                                                        <svg className="animate-spin h-5 w-5 text-indigo-900" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                        </svg>
+                                                        <span>{processingStatus || "Đang xử lý..."}</span>
+                                                     </>
+                                                ) : (
+                                                    <>
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        <span>Bắt đầu phiên âm</span>
+                                                    </>
+                                                )}
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Analysis Settings */}
+                        <div className="bg-black/20 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl p-4 flex-1 flex flex-col">
+                            <div className="flex items-center justify-between mb-3">
+                                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-pink-300" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+                                    </svg>
+                                    Lời nhắc Hệ thống Phân tích
+                                 </h3>
+                                 <div className="flex items-center gap-2">
+                                     <label className="text-[10px] text-white/70 font-medium uppercase tracking-wider">Tự động chạy</label>
+                                     <button 
+                                        onClick={() => setAutoAnalyze(!autoAnalyze)}
+                                        className={`w-9 h-5 rounded-full transition-colors relative ${autoAnalyze ? 'bg-green-500' : 'bg-white/20'}`}
+                                     >
+                                         <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-transform ${autoAnalyze ? 'left-5' : 'left-1'}`} />
+                                     </button>
+                                 </div>
+                            </div>
+                            <textarea
+                                value={systemPrompt}
+                                onChange={(e) => setSystemPrompt(e.target.value)}
+                                className="w-full flex-1 bg-black/20 text-white text-sm p-3 rounded-xl border border-white/10 focus:border-pink-500 focus:ring-1 focus:ring-pink-500 outline-none resize-none placeholder-white/40"
+                                placeholder="Nhập hướng dẫn để phân tích bản phiên âm (ví dụ: Tóm tắt, Trích xuất ngày tháng, Dịch)"
+                            />
+                             {!autoAnalyze && transcription && !isAnalyzing && !isProcessing && (
+                                <button 
+                                    onClick={() => runAnalysis(transcription)}
+                                    className="mt-3 w-full py-2 bg-pink-500/20 border border-pink-500/30 hover:bg-pink-500/30 text-pink-200 rounded-lg text-sm font-medium transition-all"
+                                >
+                                    Chạy Phân tích
+                                </button>
+                             )}
+                        </div>
+                    </div>
+
+                    {/* Right Column: Results */}
+                    <div className="flex-1 flex flex-col gap-4 min-h-0 overflow-hidden">
+                        
+                        {/* Transcription Result */}
+                        <div className={`bg-black/20 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl p-5 flex flex-col transition-all duration-500 ${analysis ? 'h-1/2' : 'h-full'}`}>
+                            <div className="flex items-center justify-between mb-3 flex-shrink-0">
+                                <h3 className="text-xs font-bold text-white/80 uppercase tracking-wider flex items-center gap-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                    Bản phiên âm
+                                </h3>
+                                {transcription && (
+                                    <button 
+                                        onClick={() => navigator.clipboard.writeText(transcription)}
+                                        className="p-1.5 text-white/60 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                                        title="Sao chép văn bản"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                        </svg>
+                                    </button>
+                                )}
+                            </div>
+                            
+                            <div className="flex-1 bg-black/20 rounded-xl border border-white/5 overflow-y-auto custom-scrollbar p-4">
+                                {transcription ? (
+                                    <p className="text-white/90 leading-relaxed whitespace-pre-wrap text-sm md:text-base">{transcription}</p>
+                                ) : (
+                                    <div className="h-full flex flex-col items-center justify-center text-white/40">
+                                        <p className="text-sm">Chưa có bản phiên âm nào</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Analysis Result */}
+                        {(analysis || isAnalyzing) && (
+                            <div className="flex-1 bg-gradient-to-br from-indigo-900/40 to-purple-900/40 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl p-5 flex flex-col animate-fade-in h-1/2">
+                                 <div className="flex items-center justify-between mb-3 flex-shrink-0">
+                                    <h3 className="text-xs font-bold text-pink-300 uppercase tracking-wider flex items-center gap-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fillRule="evenodd" d="M5 2a1 1 0 011 1v1h1a1 1 0 010 2H6v1a1 1 0 01-2 0V6H3a1 1 0 010-2h1V3a1 1 0 011-1zm0 5a1 1 0 011 1v1h1a1 1 0 110 2H6v1a1 1 0 11-2 0v-1H3a1 1 0 110-2h1V8a1 1 0 011-1zm5-5a1 1 0 11-2 0 1 1 0 012 0zm5 0a1 1 0 11-2 0 1 1 0 012 0z" clipRule="evenodd" />
+                                        </svg>
+                                        Phân tích AI
+                                    </h3>
+                                    {analysis && (
+                                        <button 
+                                            onClick={() => navigator.clipboard.writeText(analysis)}
+                                            className="p-1.5 text-white/60 hover:text-pink-300 hover:bg-pink-500/20 rounded-lg transition-colors"
+                                            title="Sao chép phân tích"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                            </svg>
+                                        </button>
+                                    )}
+                                </div>
+                                
+                                <div className="flex-1 bg-black/20 rounded-xl border border-white/5 overflow-y-auto custom-scrollbar p-4 shadow-inner">
+                                    {isAnalyzing && !analysis ? (
+                                        <div className="flex items-center justify-center h-full gap-3">
+                                            <svg className="animate-spin h-5 w-5 text-pink-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            <span className="text-sm text-pink-200 animate-pulse">Đang phân tích với Lời nhắc Hệ thống...</span>
+                                        </div>
+                                    ) : (
+                                        <div className="markdown-body text-white/90 text-sm md:text-base leading-relaxed">
+                                            {analysis.split('\n').map((line, i) => (
+                                                <p key={i} className="mb-2">{line}</p>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                    </div>
+                </div>
+            </div>
+        );
+      };
+
+      // ==========================================
+      // APP WRAPPER
+      // ==========================================
+
+      const App = () => {
+        return (
+          // Thay đổi nền sang Gradient Tím/Hồng đậm
+          <div className="flex flex-col h-screen w-full bg-gradient-to-br from-violet-600 via-fuchsia-600 to-pink-500 overflow-hidden">
+            <header className="flex items-center gap-3 px-6 py-4 bg-black/10 border-b border-white/10 backdrop-blur-md sticky top-0 z-50">
+              <div className="h-8 w-8 bg-white/20 backdrop-blur-lg rounded-lg flex items-center justify-center shadow-lg border border-white/20">
+                   <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                  </svg>
+              </div>
+              <h1 className="text-xl font-bold text-white drop-shadow-sm">Gemini Phiên Âm</h1>
+            </header>
+            
+            <main className="flex-1 relative overflow-hidden">
+              {/* Background ambient effects - Subtle overlays */}
+              <div className="absolute top-0 left-0 w-full h-full bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 pointer-events-none mix-blend-overlay"></div>
+              
+              <div className="relative h-full w-full flex flex-col">
+                <AudioTranscriber />
+              </div>
+            </main>
+          </div>
+        );
+      };
+
+      const rootElement = document.getElementById('root');
+      if (rootElement) {
+          const root = createRoot(rootElement);
+          root.render(<App />);
+      }
+    </script>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
